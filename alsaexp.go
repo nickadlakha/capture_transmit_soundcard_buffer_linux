@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"io"
-	"sync"
 
 	"github.com/jfreymuth/pulse"
 	"github.com/jfreymuth/pulse/proto"
@@ -16,8 +15,6 @@ const (
 	srvAddr         = ":9999"
 	maxDatagramSize = 512 * 1024
 )
-
-var wg sync.WaitGroup
 
 func start_transmitter(finish chan struct{}) {
 	c, err := pulse.NewClient()
@@ -65,8 +62,6 @@ func start_transmitter(finish chan struct{}) {
 }
 
 func start_capture(stdin bool) {
-	defer wg.Done()
-
 	iopr, iopw := io.Pipe()
 
 	if stdin {
@@ -114,9 +109,7 @@ func start_capture(stdin bool) {
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "-" {
-		wg.Add(1)
-		go start_capture(true)
-		wg.Wait()
+		start_capture(true)
 	}
 
 	fmt.Print("Press enter [s] to transmit, [c] to consume and enter to exit.....\n")
@@ -133,9 +126,7 @@ func main() {
 		} else if input[0] == 's' {
 			go start_transmitter(finish)
 		} else if input[0] == 'c' {
-			wg.Add(1)
-			go start_capture(false)
-			wg.Wait()
+			start_capture(false)
 		}
 	}
 
