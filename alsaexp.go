@@ -6,18 +6,18 @@ import (
 	"os"
 
 	"io"
+	"sync"
 
 	"github.com/jfreymuth/pulse"
 	"github.com/jfreymuth/pulse/proto"
 )
 
 const (
-	_ uint8 = iota
-	S16LE
-	S16BE
 	srvAddr         = ":9999"
 	maxDatagramSize = 512 * 1024
 )
+
+var wg sync.WaitGroup
 
 func start_transmitter(finish chan struct{}) {
 	c, err := pulse.NewClient()
@@ -64,24 +64,34 @@ func start_transmitter(finish chan struct{}) {
 	stream.Stop()
 }
 
-func start_capture() {
-	if len(os.Args) != 2 {
-		fmt.Fprintf(os.Stderr, "Please provide the server address to connect\n")
-		return
+func start_capture(stdin bool) {
+	defer wg.Done()
+
+	iopr, iopw := io.Pipe()
+
+	if stdin {
+		go io.Copy(iopw, os.Stdin)
+	} else {
+		if len(os.Args) != 2 {
+			fmt.Fprintf(os.Stderr, "Please provide the server address to connect\n")
+			return
+		}
+
+		addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s%s", os.Args[1], srvAddr))
+		if err != nil {
+			panic(err)
+		}
+
+		conn, err := net.DialTCP("tcp", nil, addr)
+
+		if err != nil {
+			panic(err)
+		}
+
+		conn.SetReadBuffer(maxDatagramSize)
+
+		go io.Copy(iopw, conn)
 	}
-
-	addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s%s", os.Args[1], srvAddr))
-	if err != nil {
-		panic(err)
-	}
-
-	conn, err := net.DialTCP("tcp", nil, addr)
-
-	if err != nil {
-		panic(err)
-	}
-
-	conn.SetReadBuffer(maxDatagramSize)
 
 	c, err := pulse.NewClient()
 	if err != nil {
@@ -89,10 +99,6 @@ func start_capture() {
 		return
 	}
 	defer c.Close()
-
-	iopr, iopw := io.Pipe()
-
-	go io.Copy(iopw, conn)
 
 	stream, err := c.NewPlayback(pulse.NewReader(iopr, proto.FormatInt16LE), pulse.PlaybackSampleRate(44100), pulse.PlaybackStereo, pulse.PlaybackLatency(3))
 	if err != nil {
@@ -107,6 +113,12 @@ func start_capture() {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "-" {
+		wg.Add(1)
+		go start_capture(true)
+		wg.Wait()
+	}
+
 	fmt.Print("Press enter [s] to transmit, [c] to consume and enter to exit.....\n")
 	input := make([]byte, 2)
 
@@ -121,7 +133,9 @@ func main() {
 		} else if input[0] == 's' {
 			go start_transmitter(finish)
 		} else if input[0] == 'c' {
-			start_capture()
+			wg.Add(1)
+			go start_capture(false)
+			wg.Wait()
 		}
 	}
 
