@@ -102,7 +102,13 @@ func start_capture(stdin bool) {
 	}
 	stream.Start()
 	stream.Drain()
-	fmt.Println("Underflow:", stream.Underflow())
+
+	if stream.Underflow() {
+		for {
+			stream.Stop()
+			stream.Start()
+		}
+	}
 
 	stream.Close()
 }
