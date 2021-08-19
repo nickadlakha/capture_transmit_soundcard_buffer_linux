@@ -7,6 +7,8 @@ import (
 
 	"io"
 
+	"strconv"
+
 	"github.com/jfreymuth/pulse"
 	"github.com/jfreymuth/pulse/proto"
 )
@@ -61,13 +63,13 @@ func start_transmitter(finish chan struct{}) {
 	stream.Stop()
 }
 
-func start_capture(stdin bool) {
+func start_capture(stdin bool, latency int) {
 	iopr, iopw := io.Pipe()
 
 	if stdin {
 		go io.Copy(iopw, os.Stdin)
 	} else {
-		if len(os.Args) != 2 {
+		if len(os.Args) <= 1 {
 			fmt.Fprintf(os.Stderr, "Please provide the server address to connect\n")
 			return
 		}
@@ -95,7 +97,7 @@ func start_capture(stdin bool) {
 	}
 	defer c.Close()
 
-	stream, err := c.NewPlayback(pulse.NewReader(iopr, proto.FormatInt16LE), pulse.PlaybackSampleRate(44100), pulse.PlaybackStereo, pulse.PlaybackLatency(3))
+	stream, err := c.NewPlayback(pulse.NewReader(iopr, proto.FormatInt16LE), pulse.PlaybackSampleRate(44100), pulse.PlaybackStereo, pulse.PlaybackLatency(float64(latency)))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -114,8 +116,14 @@ func start_capture(stdin bool) {
 }
 
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "-" {
-		start_capture(true)
+	latency := 1
+
+	if len(os.Args) == 3 {
+		latency, _ = strconv.Atoi(os.Args[2])
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "-" {
+		start_capture(true, latency)
 	}
 
 	fmt.Print("Press enter [s] to transmit, [c] to consume and enter to exit.....\n")
@@ -132,7 +140,7 @@ func main() {
 		} else if input[0] == 's' {
 			go start_transmitter(finish)
 		} else if input[0] == 'c' {
-			start_capture(false)
+			start_capture(false, latency)
 		}
 	}
 
