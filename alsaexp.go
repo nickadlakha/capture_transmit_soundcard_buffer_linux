@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	srvAddr         = ":9999"
-	maxDatagramSize = 512 * 1024
+	address         = "239.0.0.0:9999"
+	maxDatagramSize = 8 * 1024
 )
 
 func start_transmitter(finish chan struct{}) {
@@ -33,18 +33,17 @@ func start_transmitter(finish chan struct{}) {
 		panic(err)
 	}
 
-	listener, err := net.Listen("tcp", srvAddr)
+	addr, err := net.ResolveUDPAddr("udp4", address)
 	if err != nil {
 		panic(err)
 	}
 
-	defer listener.Close()
-
-	conn, err := listener.Accept()
-
+	conn, err := net.DialUDP("udp4", nil, addr)
 	if err != nil {
 		panic(err)
 	}
+
+	conn.SetWriteBuffer(maxDatagramSize)
 
 	iopr, iopw := io.Pipe()
 
@@ -74,13 +73,12 @@ func start_capture(stdin bool, latency int) {
 			return
 		}
 
-		addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s%s", os.Args[1], srvAddr))
+		addr, err := net.ResolveUDPAddr("udp4", address)
 		if err != nil {
 			panic(err)
 		}
 
-		conn, err := net.DialTCP("tcp", nil, addr)
-
+		conn, err := net.ListenMulticastUDP("udp4", nil, addr)
 		if err != nil {
 			panic(err)
 		}
