@@ -112,7 +112,7 @@ func (s socketWrRd) Write(p []byte) (int, error) {
 
 func (s socketWrRd) Read(p []byte) (int, error) {
 	var slen C.uint
-	n := C.sctp_recvmsg(C.int(s), unsafe.Pointer(&p[0]), C.SIZE,
+	n := C.sctp_recvmsg(C.int(s), unsafe.Pointer(&p[0]), 32*C.SIZE,
 		(*C.struct_sockaddr)(unsafe.Pointer(&C.serv_addr)), &slen, &C.sinfo, &C.flags)
 
 	if n < 0 {
@@ -183,6 +183,7 @@ func start_capture(stdin bool, latency int) {
 		}
 
 		var swr socketWrRd = socketWrRd(C.client(C.CString(os.Args[1])))
+		defer C.close(C.int(swr))
 
 		go func() {
 			_, err := io.Copy(iopw, swr)
