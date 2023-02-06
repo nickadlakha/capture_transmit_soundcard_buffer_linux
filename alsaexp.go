@@ -10,8 +10,9 @@ package main
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netinet/sctp.h>
+#include <unistd.h>
 
-#define SIZE 8 * 1024
+#define SIZE 1024
 #define SPORT 3000
 
 unsigned char buf[SIZE];
@@ -19,15 +20,14 @@ struct sctp_sndrcvinfo sinfo;
 int sockfd, slen, flags;
 struct sockaddr_in serv_addr, client_addr;
 struct sctp_event_subscribe events;
-sctp_assoc_t assoc_id;
 
 int server(void) {
 	int client_sockfd;
 
     sockfd = socket(AF_INET, SOCK_SEQPACKET, IPPROTO_SCTP);
     if (sockfd < 0) {
-        perror(NULL);
-        exit(2);
+        perror("Error creating sctp socket");
+        exit(20);
     }
 
     bzero(&serv_addr, sizeof(serv_addr));
@@ -35,36 +35,38 @@ int server(void) {
     serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     serv_addr.sin_port = htons(SPORT);
     if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
-        perror(NULL);
-        exit(3);
+        perror("Address binding failed");
+        exit(21);
     }
 
-    bzero(&events, sizeof(events));
-    events.sctp_data_io_event = 1;
+	bzero(&events, sizeof(events));
     events.sctp_association_event = 1;
-    events.sctp_shutdown_event = 1;
-    if (setsockopt(sockfd, IPPROTO_SCTP,
-                       SCTP_EVENTS, &events, sizeof(events))) {
+
+	if (setsockopt(sockfd, IPPROTO_SCTP, SCTP_EVENTS, &events, sizeof(events))) {
         perror("set sock opt\n");
     }
 
-    listen(sockfd, 5);
-
+    listen(sockfd, SOMAXCONN);
     printf("Listening on sctp server port %d\n", SPORT);
-
     slen = sizeof(client_addr);
     sctp_recvmsg(sockfd, buf, SIZE, (struct sockaddr *) &client_addr, &slen,
     		&sinfo, &flags);
+
 	bzero(&sinfo, sizeof(sinfo));
     sinfo.sinfo_flags |= SCTP_SENDALL;
 	return sockfd;
 }
 
+void wait_for_client() {
+	sctp_recvmsg(sockfd, buf, SIZE, (struct sockaddr *) &client_addr, &slen,
+    		&sinfo, &flags);
+}
+
 int client(char *addr) {
 	sockfd = socket(AF_INET, SOCK_SEQPACKET, IPPROTO_SCTP);
     if (sockfd < 0) {
-        perror(NULL);
-        exit(2);
+        perror("Error creating sctp socket");
+        exit(22);
     }
 
     bzero(&serv_addr, sizeof(serv_addr));
@@ -74,11 +76,10 @@ int client(char *addr) {
 
 	if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
     		perror("connect to server failed");
-        exit(3);
+        exit(23);
     }
 
     printf("Connected to server port %d\n", SPORT);
-
     return sockfd;
 }
 */
@@ -137,6 +138,8 @@ func start_transmitter(finish chan struct{}) {
 	}
 
 	iopr, iopw := io.Pipe()
+	defer iopr.Close()
+	defer iopw.Close()
 
 	stream, err := c.NewRecord(pulse.NewWriter(iopw, proto.FormatInt16LE), pulse.RecordMonitor(s), pulse.RecordSampleRate(44100), pulse.RecordStereo)
 
@@ -144,18 +147,32 @@ func start_transmitter(finish chan struct{}) {
 		panic(err)
 	}
 
+	defer stream.Close()
+	defer stream.Stop()
+
 	var sw socketWrRd = socketWrRd(C.server())
+	defer C.close(C.int(sw))
 	stream.Start()
 
-	go io.Copy(sw, iopr)
+	go func() {
+	REPEAT:
+		_, err := io.Copy(sw, iopr)
+
+		if err != nil {
+			fmt.Println(err)
+			C.wait_for_client()
+			goto REPEAT
+		}
+	}()
 
 	fmt.Println("Staring transmission")
 	<-finish
-	stream.Stop()
 }
 
 func start_capture(stdin bool, latency int) {
 	iopr, iopw := io.Pipe()
+	defer iopr.Close()
+	defer iopw.Close()
 
 	if stdin {
 		go io.Copy(iopw, os.Stdin)
@@ -167,7 +184,11 @@ func start_capture(stdin bool, latency int) {
 
 		var swr socketWrRd = socketWrRd(C.client(C.CString(os.Args[1])))
 
-		go io.Copy(iopw, swr)
+		go func() {
+			_, err := io.Copy(iopw, swr)
+			fmt.Println("Server closed the connection ", err)
+			os.Exit(24)
+		}()
 	}
 
 	c, err := pulse.NewClient()
@@ -182,17 +203,9 @@ func start_capture(stdin bool, latency int) {
 		fmt.Println(err)
 		return
 	}
+	defer stream.Close()
 	stream.Start()
 	stream.Drain()
-
-	if stream.Underflow() {
-		for {
-			stream.Stop()
-			stream.Start()
-		}
-	}
-
-	stream.Close()
 }
 
 func main() {
