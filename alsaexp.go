@@ -49,8 +49,8 @@ int server(void) {
     listen(sockfd, SOMAXCONN);
     printf("Listening on sctp server port %d\n", SPORT);
     slen = sizeof(client_addr);
-    sctp_recvmsg(sockfd, buf, SIZE, (struct sockaddr *) &client_addr, &slen,
-    		&sinfo, &flags);
+    sctp_recvmsg(sockfd, buf, SIZE, (struct sockaddr *) &client_addr, &slen, &sinfo,
+    		&flags);
 
 	bzero(&sinfo, sizeof(sinfo));
     sinfo.sinfo_flags |= SCTP_SENDALL;
@@ -58,12 +58,13 @@ int server(void) {
 }
 
 void wait_for_client() {
-	sctp_recvmsg(sockfd, buf, SIZE, (struct sockaddr *) &client_addr, &slen,
-    		&sinfo, &flags);
+	sctp_recvmsg(sockfd, buf, SIZE, (struct sockaddr *) &client_addr, &slen, &sinfo,
+		&flags);
 }
 
 int client(char *addr) {
-	sockfd = socket(AF_INET, SOCK_SEQPACKET, IPPROTO_SCTP);
+	sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
+
     if (sockfd < 0) {
         perror("Error creating sctp socket");
         exit(22);
@@ -86,11 +87,11 @@ int client(char *addr) {
 import "C"
 
 import (
+	"bufio"
 	"fmt"
-	"os"
-
 	"io"
-
+	"log"
+	"os"
 	"strconv"
 	"unsafe"
 
@@ -98,12 +99,22 @@ import (
 	"github.com/jfreymuth/pulse/proto"
 )
 
+type cstate int
+
+const (
+	EMP cstate = iota
+	SR
+	CL
+)
+
+var cs cstate = EMP
+
 type socketWrRd C.int
 
 func (s socketWrRd) Write(p []byte) (int, error) {
 	n := C.sctp_send(C.int(s), unsafe.Pointer(&p[0]), C.ulong(len(p)), &C.sinfo, 0)
 
-	if n < 0 {
+	if n <= 0 {
 		return 0, fmt.Errorf("sctp send error")
 	}
 
@@ -112,21 +123,25 @@ func (s socketWrRd) Write(p []byte) (int, error) {
 
 func (s socketWrRd) Read(p []byte) (int, error) {
 	var slen C.uint
-	n := C.sctp_recvmsg(C.int(s), unsafe.Pointer(&p[0]), 32*C.SIZE,
+	n := C.sctp_recvmsg(C.int(s), unsafe.Pointer(&p[0]), 64*C.SIZE,
 		(*C.struct_sockaddr)(unsafe.Pointer(&C.serv_addr)), &slen, &C.sinfo, &C.flags)
 
-	if n < 0 {
+	if n <= 0 {
 		return 0, fmt.Errorf("sctp read error")
 	}
 
 	return int(n), nil
 }
 
-func start_transmitter(finish chan struct{}) {
+func prompt() {
+	fmt.Fprintf(os.Stderr, "\nPress enter [s] to transmit, [c] to consume and enter to exit.....::")
+}
+
+func start_transmitter(finish <-chan bool) {
 	c, err := pulse.NewClient()
 
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 
 	defer c.Close()
@@ -134,7 +149,7 @@ func start_transmitter(finish chan struct{}) {
 	s, err := c.DefaultSink()
 
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 
 	iopr, iopw := io.Pipe()
@@ -144,7 +159,7 @@ func start_transmitter(finish chan struct{}) {
 	stream, err := c.NewRecord(pulse.NewWriter(iopw, proto.FormatInt16LE), pulse.RecordMonitor(s), pulse.RecordSampleRate(44100), pulse.RecordStereo)
 
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 
 	defer stream.Close()
@@ -152,90 +167,129 @@ func start_transmitter(finish chan struct{}) {
 
 	var sw socketWrRd = socketWrRd(C.server())
 	defer C.close(C.int(sw))
+	ifinish := make(chan struct{})
+
 	stream.Start()
 
 	go func() {
-	REPEAT:
-		_, err := io.Copy(sw, iopr)
+		buf := make([]byte, 64*1024)
 
-		if err != nil {
-			fmt.Println(err)
-			C.wait_for_client()
-			goto REPEAT
+		for {
+			select {
+			case <-ifinish:
+				return
+			default:
+				io.CopyBuffer(sw, iopr, buf)
+				//log.Println(err)
+				C.wait_for_client()
+			}
 		}
 	}()
 
-	fmt.Println("Staring transmission")
+	log.Println("Starting transmission")
+	prompt()
 	<-finish
+	close(ifinish)
 }
 
-func start_capture(stdin bool, latency int) {
+func start_capture(finish chan bool, latency int, server string) {
 	iopr, iopw := io.Pipe()
-	defer iopr.Close()
 	defer iopw.Close()
 
-	if stdin {
-		go io.Copy(iopw, os.Stdin)
-	} else {
-		if len(os.Args) <= 1 {
-			fmt.Fprintf(os.Stderr, "Please provide the server address to connect\n")
-			return
-		}
-
-		var swr socketWrRd = socketWrRd(C.client(C.CString(os.Args[1])))
-		defer C.close(C.int(swr))
-
-		go func() {
-			_, err := io.Copy(iopw, swr)
-			fmt.Println("Server closed the connection ", err)
-			os.Exit(24)
-		}()
-	}
-
+	var swr socketWrRd = socketWrRd(C.client(C.CString(server)))
 	c, err := pulse.NewClient()
 	if err != nil {
-		fmt.Println(err)
-		return
+		log.Panic(err)
 	}
-	defer c.Close()
 
 	stream, err := c.NewPlayback(pulse.NewReader(iopr, proto.FormatInt16LE), pulse.PlaybackSampleRate(44100), pulse.PlaybackStereo, pulse.PlaybackLatency(float64(latency)))
 	if err != nil {
-		fmt.Println(err)
-		return
+		log.Panic(err)
 	}
-	defer stream.Close()
-	stream.Start()
-	stream.Drain()
+
+	go func(st *pulse.PlaybackStream) {
+		defer iopr.Close()
+		defer C.close(C.int(swr))
+		defer c.Close()
+		defer stream.Close()
+
+		go func() {
+			st.Start()
+			st.Drain()
+		}()
+
+		buf := make([]byte, 64*1024)
+		_, err := io.CopyBuffer(iopw, swr, buf)
+		log.Println(err, st.Error(), st.Underflow(), st.Running())
+
+		if err.Error() == "sctp read error" {
+			cs = EMP
+			finish <- true
+		}
+		prompt()
+		return
+	}(stream)
+
+	prompt()
+	<-finish
 }
 
 func main() {
-	latency := 1
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	bread := bufio.NewReader(os.Stdin)
+	var (
+		latency int = 1
+		input   []byte
+		err     error
+	)
 
-	if len(os.Args) == 3 {
-		latency, _ = strconv.Atoi(os.Args[2])
+	if len(os.Args) == 2 {
+		latency, _ = strconv.Atoi(os.Args[1])
 	}
 
-	if len(os.Args) > 1 && os.Args[1] == "-" {
-		start_capture(true, latency)
-	}
-
-	fmt.Print("Press enter [s] to transmit, [c] to consume and enter to exit.....\n")
-	input := make([]byte, 2)
-
-	finish := make(chan struct{})
+	finish := make(chan bool)
+	defer close(finish)
+	prompt()
 
 	for {
-		os.Stdin.Read(input)
+		input, err = bread.ReadBytes('\n')
+
+		if err != nil {
+			continue
+		}
 
 		if input[0] == '\n' {
-			close(finish)
 			break
 		} else if input[0] == 's' {
-			go start_transmitter(finish)
+			if cs == EMP || cs == CL {
+				if cs == CL {
+					finish <- true
+				}
+
+				go start_transmitter(finish)
+				cs = SR
+			} else {
+				prompt()
+			}
 		} else if input[0] == 'c' {
-			start_capture(false, latency)
+			if cs == EMP || cs == SR {
+				if cs == SR {
+					finish <- true
+				}
+
+			GETSERVERADDRESS:
+				fmt.Fprintf(os.Stderr, "\nPlease enter the server address to connect.....::")
+				input, err = bread.ReadBytes('\n')
+
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "\nError, please re-enter the server address")
+					goto GETSERVERADDRESS
+				}
+				go start_capture(finish, latency, string(input))
+				cs = CL
+			} else {
+				prompt()
+			}
 		}
 	}
-
 }
