@@ -1,3 +1,6 @@
+## Pre-requisites ##
+* `sudo apt-get install -y libsctp-dev`
+
 ## Compiling ##
 * `go mod tidy`
 * `go build alsaexp.go`
